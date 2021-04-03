@@ -1,0 +1,451 @@
+---
+title: "Untitled"
+author: "Tina"
+date: "28/03/2021"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-packages, echo=TRUE, message=FALSE}
+library(magrittr)
+library(knitr)
+library(purrr)
+library(readxl)
+library(tidyr)
+library(corrplot)
+library(corrgram)
+library(leaflet)
+library(rworldmap)
+library(ggplot2)
+library(ggthemes)
+library(forcats)
+library(dplyr)
+library(dbplyr)
+library(lubridate)
+library(arules)
+library(arulesViz)
+library(readxl)
+library(RColorBrewer)
+
+ 
+#DATA PREPARATION
+# combining the two worksheets in the excel file in r
+excel_sheets('online_retail_II.xlsx')
+data<- excel_sheets('online_retail_II.xlsx') %>% map_df(~read_xlsx('online_retail_II.xlsx',.))
+head(data)
+str(data)
+summary(data)
+
+#we would adjust the type as the need arise
+
+#total number of distinct customers
+n_distinct(data$`Customer ID`, na.rm = T)
+
+#total number of Country sales happen
+n_distinct(data$Country)
+
+# total number of product
+n_distinct(data$StockCode, na.rm = T)
+
+#Total number transcation by invoice
+n_distinct(data$Invoice,na.rm = T)
+
+# check for NA in the dataframe
+colSums(is.na(data))
+
+#looks like all the NAs from the Description column generated 0 income
+NA_desc<-data[is.na(data$Description),]
+NA_desc$totalsale <- NA_desc$Quantity * NA_desc$Price
+sum(NA_desc$totalsale)
+
+#lets look at NA from the  Customer ID
+NA_cust<-data[is.na(data$`Customer ID`),]
+NA_cust$totalsale <- NA_cust$Quantity * NA_cust$Price
+sum(NA_cust$totalsale)
+
+# We can see there is a sale of  2,638,958 made from Customer ID that is NA, we would leave that in data and further analyse this.
+
+#lets take out Description columns with NA its probably just adjustments and it has no 0 sales
+dataclean<- data[complete.cases(data[ ,3]),]
+
+#how many cancelled invoice
+table(grepl("^C", data$Invoice))
+#we have 19494 cancelled invoice
+
+#we have some cancelled invoice with the invoice number starts with C, we would remove this from our data
+dataclean <-dataclean[!grepl('C',dataclean$Invoice),]
+
+# we can see description like Amazon Fee and bad debt adjustment, lets take those all out from our analysis
+dataclean <- dataclean %>% filter(!StockCode %in% c("DOT", "POST", "M", "AMAZONFEE", "B"))
+
+# add an additional column TotalSale= Quantity*Price
+dataclean$TotalSale<- dataclean$Quantity * dataclean$Price
+
+#we need to also add additional columns for month, year
+dataclean$YearSale<- year(dataclean$InvoiceDate)
+dataclean$MonthSale<- months(dataclean$InvoiceDate)
+
+# Explanatory Data Analysis
+# Sale Analysis┬
+#For the purpose of getting the most accurate sale value, i would assign customer ID 00000 to NA, instead #of filtering it out as this is almost 25% of our data
+
+Sale<-dataclean
+Sale[, 7][is.na(Sale[, 7])] <- 00000
+Sale$hour <- as.numeric(format(dataclean$InvoiceDate,format="%H"))
+Sale$InvoiceDate = date(Sale$InvoiceDate)
+Sale$Weekdays <- weekdays(Sale$InvoiceDate)
+Sale$YearSale<- year(Sale$InvoiceDate)
+
+
+# what time is the peak period for sale
+Peakhour <- Sale %>% group_by(hour) %>% summarise(Revenue=sum(TotalSale)) %>% arrange(desc(Revenue))
+Peakhour
+
+ggplot() +
+  geom_bar(data= Peakhour, aes(x = reorder(factor(hour), Revenue), y = Revenue, fill=hour), stat = "identity")+ scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Hour", 
+       y = "Revenue (GBP)",
+       title = "Hourly Sales")
+  
+# the peak period is 10-1, it is safe to say lunch time is the peak period, we can have more staffs to help customers with their shopping online 
+
+#lets compare peak period in terms of the number of transcation 
+trand<-Sale %>%
+  group_by(hour) %>%
+  summarise(transactions = n_distinct(Invoice))%>% arrange(desc(transactions))
+  
+ggplot(data=trand, aes(x = reorder(factor(hour), transactions), y = transactions,fill=hour)) + geom_col() + labs(x = 'Hour Of Day', y = 'Total_Transc', title = 'Transactions by Hour Of Day')+ scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))
+
+#Weekly Sales
+print("What Day of the Week has the highest sales ?")
+
+highsales <- Sale %>% group_by(Weekdays) %>% summarize(Revenue=sum(TotalSale)) %>% arrange(desc(Revenue))
+head(highsales)
+
+ggplot() +
+  geom_bar(data= highsales, aes(x = reorder(factor(Weekdays), Revenue), y = Revenue, fill=Weekdays), stat = "identity")+ scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Weekdays", 
+       y = "Revenue (GBP)",
+       title = "Days of the weeks Sales",
+       color="Weekdays")
+
+       
+#Total Monthly Sales
+Sale %>% group_by(YearSale,MonthSale) %>% summarize(Revenue=sum(TotalSale)) %>% arrange(desc(Revenue))
+
+Sale$YearSale<- as.factor(Sale$YearSale)
+  Sale%>%
+  mutate(SalesMonth = as.character(as.integer(year(InvoiceDate) * 100 + month(InvoiceDate)))) %>%
+  group_by(YearSale, SalesMonth) %>%
+  summarise(SalesAmount = sum(TotalSale, na.rm = TRUE)) %>%
+  filter(!is.na(SalesMonth)) %>%
+  collect %>%
+  ggplot() +
+    geom_line(aes(x = SalesMonth, y = SalesAmount, group = YearSale, color = YearSale)) +
+    labs(x = "Month",
+         y = "Revenue",
+         title = "Monthly Sales",
+         color = "YearSale") +
+    theme(axis.text.x = element_text(angle = 45),plot.title = element_text(hjust = 0.5)) +
+    scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+    scale_color_brewer(palette = "Dark2")
+
+#Total Sales each Year 
+salebyyear<- Sale %>% group_by(YearSale) %>% summarise(Revenue=sum(TotalSale))
+salebyyear
+
+ggplot(data=salebyyear, aes(x=YearSale, y=Revenue, fill=YearSale)) +
+  geom_bar(stat="identity")+scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))+ labs(x = "Year of Sale", 
+       y = "Revenue (GBP)",
+       title = "Yearly Sales")
+
+#lets see the Countries based on Total Sales
+salebycountry<- Sale %>% group_by(Country) %>% summarise(Revenue=sum(TotalSale)) %>% arrange(desc(Revenue))
+salebycountry
+
+#visual representation of country with highest sales
+salebycountry %>% mutate(Country = fct_reorder(Country,Revenue)) %>% ggplot(aes(Country, Revenue))+
+geom_bar(stat="identity", fill="#f68060", alpha=.8, width=.9)+coord_flip()+xlab("")+ theme_bw()+ scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) + labs(x = "Country", 
+       y = "Revenue",
+       title = "  Country by Sales")
+
+#sales by country on map
+sales_by_country <- Sale %>% group_by(Country) %>% summarise(Amount = sum(TotalSale, na.rm = TRUE)) %>% collect
+SBC <- joinCountryData2Map(sales_by_country
+                                ,joinCode = "NAME"
+                                ,nameJoinColumn = "Country", verbose = FALSE)
+  existing_countries <- subset(SBC, !is.na(Amount))
+    bins <- c(0, 100000, 200000, 300000, 400000, 500000, 600000, Inf)
+    pal <- colorBin("Dark2", domain = existing_countries$Amount, bins = bins)
+    labels <- paste0("<strong>", existing_countries$Country, "</strong><br/>", 
+                     format(existing_countries$Amount, digits = 0, big.mark = ".", decimal.mark = ",", scientific = FALSE),
+                     " GBP") %>% lapply(htmltools::HTML)
+    leaflet(existing_countries) %>%
+      addTiles() %>%  # Add default OpenStreetMap map tiles
+      addPolygons(
+        fillColor = ~pal(Amount),
+        weight = 1,
+        opacity = 1,
+        color = "white",
+        dashArray = "3",
+        fillOpacity = 0.7,
+        highlight = highlightOptions(
+          weight = 2,
+          color = "#666",
+          dashArray = "",
+          fillOpacity = 0.7,
+          bringToFront = TRUE),
+        label = labels,
+        labelOptions = labelOptions(
+          style = list("font-weight" = "normal", padding = "3px 8px"),
+          textsize = "15px",
+          direction = "auto")) %>% 
+      addLegend(pal = pal, values = ~Amount, opacity = 0.7, title ="Sales on World Map",
+                                            position = "topright") %>%
+      setView(17,34,2)                               
+
+#how many customers do we have
+length(unique(dataclean$`Customer ID`))
+
+# top 10 customers by amount spent
+dataclean %>% group_by(`Customer ID`) %>% summarise(Totalspend=sum(TotalSale)) %>% arrange(desc(Totalspend)) %>% top_n(10)
+
+#there is a lot of sales from the NA, lets take out NAs and look at the top customer
+dataclean %>% filter(!is.na(`Customer ID`)) %>% group_by(`Customer ID`) %>% summarise(Totalspend=sum(TotalSale)) %>% arrange(desc(Totalspend)) %>% top_n(10)%>%
+collect %>%
+ggplot() +
+  geom_bar(aes(x=reorder(factor(`Customer ID`),Totalspend), y=Totalspend, fill="#f68060"),stat="identity")+scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE))+ 
+  labs(x = "CustomerID", 
+       y = "Revenue (GBP)",
+       title = "Top 10 Customers")+ coord_flip()
+
+
+#lets see how many transcation has missing customer ID
+dataclean %>% summarise(no_transcation = n_distinct(`Customer ID`),
+             missing_cust_ID = sum(as.integer(is.na(`Customer ID`))))
+
+#lets group our customer to wholesale and retail assuming the transcation without customer ID is from our retail customer
+dataclean$`Customer ID`<- as.character(dataclean$`Customer ID`)
+data_clean1<- dataclean %>% mutate(CustomerGroup = ifelse(is.na(dataclean$`Customer ID`), "Retail", "Wholesale"))
+
+#visual customer type as per invoice 
+cust_type<- data_clean1 %>%
+  group_by(CustomerGroup) %>%
+  summarise(no_invoices = n(),
+            invoice_amount = sum(TotalSale, na.rm = TRUE)) %>%
+  collect()
+
+ggplot(cust_type) +
+  geom_bar(aes(x = CustomerGroup, y = no_invoices), stat = "identity", fill= "Blue") +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Customer Type", 
+       y = "No of invoices",
+       title = "No. of invoices per customer type") +
+  theme(plot.title = element_text(hjust = 0.5))+scale_fill_manual()
+  
+  
+#sales as per month by customer type
+data_clean1%>%
+  mutate(SalesMonth = as.character(as.integer(year(InvoiceDate) * 100 + month(InvoiceDate)))) %>%
+  group_by(CustomerGroup, SalesMonth) %>%
+  summarise(SalesAmount = sum(TotalSale, na.rm = TRUE)) %>%
+  filter(!is.na(SalesMonth)) %>%
+  collect %>%
+  ggplot() +
+    geom_line(aes(x = SalesMonth, y = SalesAmount, group = CustomerGroup, color = CustomerGroup)) +
+    labs(x = "Sales Month",
+         y = "Sales Amount",
+         title = "Total sales by month as per Customer Type",
+         color = "Customer group") +
+    theme(axis.text.x = element_text(angle = 45),plot.title = element_text(hjust = 0.5)) +
+    scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+    scale_color_brewer(palette = "Dark2")
+
+#Top customers with repeat purchases
+data_clean1%>%group_by(`Customer ID`,n_distinct(InvoiceDate))%>%summarise(Count=n())%>%ungroup()%>%arrange(desc(Count)) %>% head(10)
+ 
+ 
+#Product Analysis
+# How many products in store
+length(unique(dataclean$StockCode))
+
+#now lets see our top product with high Revenue
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(TotalSale))%>%arrange(desc(Sales)) %>% head(10)
+
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(TotalSale))%>%ungroup()%>%arrange(desc(Sales)) %>% head(10)%>%
+collect %>% 
+ggplot() +
+  geom_bar(aes(x = reorder(factor(Description), Sales), y = Sales), stat = "identity", fill='dodgerblue3') +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Product", 
+       y = "Total Sales",
+       title = "Top 10 products with high Revenue") + coord_flip()
+
+#lets see Top product in terms of Quantity sold
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%arrange(desc(Sales)) %>% head(10)
+
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%ungroup()%>%arrange(desc(Sales)) %>% head(10)%>%
+collect %>% 
+ggplot() +
+  geom_bar(aes(x = reorder(factor(Description), Sales), y = Sales), stat = "identity",fill='dodgerblue4') +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Product", 
+       y = "Total Unit Sold",
+       title = "Top 10 Products per unit Sold") + coord_flip()
+
+#lets see least product in terms of Quantity sold      
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%arrange(desc(Sales))%>% filter(Sales>0) %>% tail(20)
+
+dataclean%>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%ungroup()%>%arrange(desc(Sales))%>% filter(Sales>0) %>% tail(20)%>%
+collect %>% 
+ggplot() +
+  geom_bar(aes(x = reorder(factor(Description), Sales), y = Sales), stat = "identity",fill='dodgerblue4') +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Product", 
+       y = "Total Unit Sold",
+       title = "Least 10 Products per unit Sold") + coord_flip()
+
+#since we have divided our customer into retail and wholesale, lets look at top product in terms of our customer type and revenue generated
+data_clean1%>%
+  filter(CustomerGroup == "Wholesale") %>%group_by(StockCode,Description)%>%summarise(Sales=sum(TotalSale))%>%ungroup()%>%arrange(desc(Sales))%>% filter(Sales>0) %>% head(10)%>%collect%>%
+  ggplot() +
+  geom_bar(aes(x = reorder(factor(Description), Sales), y = Sales), stat = "identity", fill = "#FF6666") +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Product", 
+       y = "Sales Amount (GBP)",
+       title = "Top 10 sold products - wholesale") +
+  coord_flip()
+
+retaig<-data_clean1%>%
+  filter(CustomerGroup == "Retail") %>%group_by(StockCode,Description)%>%summarise(Sales=sum(TotalSale))%>%ungroup()%>%arrange(desc(Sales))%>% filter(Sales>0) %>% head(10)
+  ggplot(retaig, aes(y=Sales, x=reorder(factor(Description),Sales),fill=Sales)) +
+  geom_bar( stat = "identity") +
+  scale_y_continuous(labels = scales::format_format(big.mark = ".", decimal.mark = ",", scientific = FALSE)) +
+  labs(x = "Product", 
+       y = "Sales amount (GBP)",
+       title = "Top 10 sold products - Retail") +
+  coord_flip()
+  
+#lets look at Top 10 sales in term of Volume sold 
+data_clean1%>%
+  filter(CustomerGroup == "Wholesale") %>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%ungroup()%>%arrange(desc(Sales))%>% filter(Sales>0) %>% head(10)%>%collect%>%
+  ggplot() +
+  geom_bar(aes(x = reorder(factor(Description), Sales), y = Sales), stat = "identity", fill = "#FF6666")  +
+  labs(x = "Product", 
+       y = "Total Qantity Sold",
+       title = "Top 10 sold products - wholesale") +
+  coord_flip()
+
+retaig<-data_clean1%>%
+  filter(CustomerGroup == "Retail") %>%group_by(StockCode,Description)%>%summarise(Sales=sum(Quantity))%>%ungroup()%>%arrange(desc(Sales))%>% filter(Sales>0) %>% head(10)
+  ggplot(retaig, aes(y=Sales, x=reorder(factor(Description),Sales),fill=Sales)) +
+  geom_bar( stat = "identity") +
+  labs(x = "Product", 
+       y = "Total Quantity Sold",
+       title = "Top 10 sold products - Retail") +
+  coord_flip()
+
+
+#Aprori 
+# i would use the file where i cleaned and removed all NAs "data_clean2" create new data marketdata
+str(data_clean1)
+#i am removing the last 4 columns
+marketdata<- data_clean1 %>% select(-(TotalSale:CustomerGroup))
+
+# make description and country factors
+marketdata %>% mutate(Description = as.factor(Description))
+marketdata %>% mutate(Country = as.factor(Country))
+marketdata$Date <- as.Date(marketdata$InvoiceDate)
+marketdata$TransTime<- format(marketdata$InvoiceDate,"%H:%M:%S")
+marketdata$Invoice <- as.character(marketdata$Invoice)
+
+# group data  "invoice" and "Date and get the description taking out the character between the description like ","
+library(plyr)
+ transactionData <- ddply(marketdata,c("Invoice","Date"),
+                      function(df1)paste(df1$Description,
+                       collapse = ","))
+
+#we have three colums invoice, date and V1 which is the transcation item, lets take out invoice and date which is not needed and rename v1 and myitem
+colnames(transactionData)<- c("Invoice","Date","items")
+Marketbasket<- transactionData %>% select(-(Invoice:Date))
+str(Marketbasket)
+
+
+#now we have just our item list saved in Marketbasket file
+#next is write the data to a csv file so we ca then read it in with an object format
+write.csv(Marketbasket,"C:\\Users\\Home-PC\\Desktop\\R\\marketbasket.csv", quote = FALSE, row.names = FALSE)
+
+#Load data into an object of transcation class
+
+t_data <- read.transactions('C:\\Users\\Home-PC\\Desktop\\R\\marketbasket.csv', format = 'basket', sep=',')
+summary(t_data)
+#from above summary we have 38920 transcations collection of items
+#density is 0.001573005 so total item purchased is density*row*column  0.001573005*38920*12844
+purchased<- round(0.001556969*36976*12844,digit=0)
+cat("Total Item sold is:",purchased)
+
+
+#itemfrequency absolute plot
+itemFrequencyPlot(t_data,topN=20,type="absolute",col=brewer.pal(8,'Pastel2'), main="Top 20 Item Bought")
+
+#itemfrequency relative plot
+itemFrequencyPlot(t_data,topN=20,type="relative",col=brewer.pal(8,'Pastel2'), main="Top 20 Item Bought")
+#to increase the sale of 60 teatime fairy tale cases we can put it close to Regency Cakestand 3 tier
+
+#mining rules using Apriori Algorithm
+#Min Support as 0.001, confidence as 0.8(we want a strong rule)
+association.rule <- apriori(t_data, parameter = list(supp=0.001, conf=0.8,maxlen=10))
+summary(association.rule)
+
+#Lets see our rules
+#rules with high confidence
+rule_confi<-sort (association.rule, by="confidence", decreasing=TRUE)
+inspect(rule_confi[1:10])
+
+#rules with high lift
+rule_lift<-sort (association.rule, by="lift", decreasing=TRUE)
+inspect(rule_lift[1:10])
+
+
+#lets see how many subset rules we have and take out the subset rules
+arules_subset <- which(colSums(is.subset(association.rule, association.rule)) > 1)
+length(arules_subset)
+# We would leave the subset rules for the sake of this project
+
+#lets see what customers buy before they buy wrap
+association.rule_wrap <- apriori(t_data, parameter = list(supp=0.001, conf=0.8),appearance = list(default="lhs",rhs="WRAP"))
+length(association.rule_wrap)
+inspect(head(association.rule_wrap))
+
+#lets see whatcustomers buy after buying wrap
+wrap_association.rule <- apriori(t_data, parameter=list(confidence=0.8,support=0.001),appearance=list(lhs="WRAP", default="rhs"))
+inspect(head(wrap_association.rule))
+length(wrap_association.rule)
+
+#form the above it is safe to say customer only buy wrap after purchasing an item and not before.
+#if this is an in person store would be a good idea to have wrap displayed close to the chekout lane
+# since this an online store, at checkout this item can be recommended
+
+#plot rules with confidence above 0.5
+rule_conf<-(association.rule[quality(association.rule)$confidence>0.5])
+plot(rule_conf)
+
+plot(association.rule,method="two-key plot")
+# order shows the number of items in the rule
+
+#graph for 10 best rules with highest confidence
+plot(head(association.rule, n = 10, by = "confidence"), method = "graph",  engine = "htmlwidget")
+
+#graph for 10 best rules with highest confidence
+plot(head(association.rule, n = 10, by = "lift"), method = "graph",  engine = "htmlwidget")
+
+
+```
+
